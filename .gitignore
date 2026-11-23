@@ -1,0 +1,15 @@
+# OS/editor junk
+.DS_Store
+*.swp
+*~
+
+# test artifacts
+*.pcap
+*.pcapng
+*.tar.gz
+*.log
+
+# local env / secrets (never commit)
+.env
+*.token
+ha_token

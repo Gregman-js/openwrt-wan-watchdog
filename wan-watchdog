@@ -1,0 +1,97 @@
+#!/bin/sh
+# wan-watchdog v2.2 — route-surgery failover: wan (Netia) <-> wan_usb (LTE)
+# Sondy pinowane /32: 9.9.9.9 -> zawsze kablem, 1.0.0.1 -> zawsze LTE.
+# Failover = metryka LTE 5 (zamiast 20) — odporność na interwencje netifd.
+# v2.1: failover tylko, gdy BACKUP żyje (nie skakać w martwe LTE).
+# Wymagania: uci network.wan.metric='10', network.wan_usb.metric='20'; procd init.d:
+#   START=99; USE_PROCD=1; command /bin/sh /usr/bin/wan-watchdog; respawn 3600 5 0
+
+WAN_IF="wan"
+LTE_IF="wan_usb"
+LTE_GW="192.168.2.1"
+WAN_PROBE="9.9.9.9"
+LTE_PROBE="1.0.0.1"
+FAIL_MAX=3      # porażek sondy wan -> decyzja (x10s = 30s)
+OK_MIN=2        # sukcesów sondy wan -> powrót (x10s = 20s)
+SLEEP_OK=10
+SLEEP_LTE=30
+HA_URL="http://192.168.1.10:8123/api/states/sensor.r6c_active_wan"
+HA_TOKEN_FILE="/root/.ha_token"   # opcjonalnie: long-lived token HA, chmod 600
+
+fail=0; ok=0; state="wan"
+
+log() { logger -t wan-watchdog "$1"; }
+
+ha_push() {
+  [ -f "$HA_TOKEN_FILE" ] || return 0
+  T=$(cat "$HA_TOKEN_FILE")
+  curl -s -m 5 -X POST -H "Authorization: Bearer $T" \
+    -H "Content-Type: application/json" \
+    -d "{\"state\":\"$1\",\"attributes\":{\"reason\":\"$2\"}}" "$HA_URL" >/dev/null 2>&1
+}
+
+get_wan() {
+  # v2.3: jsonfilter z kreskowanym kluczem (ipv4-address) wywala parser na 25.12
+  # ("Invalid escape sequence") — składnia nawiasowa + fallback przez ip -4 addr.
+  local s
+  s=$(ifstatus $WAN_IF 2>/dev/null)
+  WAN_IP=$(echo "$s" | jsonfilter -e '@["ipv4-address"][0]["address"]' 2>/dev/null)
+  [ -n "$WAN_IP" ] || WAN_IP=$(echo "$s" | jsonfilter -e '@.device' 2>/dev/null | xargs -I{} ip -4 addr show dev {} 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
+  WAN_GW=$(echo "$s" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+}
+
+probe_wan() { ping -c1 -W2 "$WAN_PROBE" >/dev/null 2>&1; }
+probe_lte() { ping -c1 -W2 "$LTE_PROBE" >/dev/null 2>&1; }
+
+set_lte_first()  { ip route replace default via "$LTE_GW" dev "$LTE_IF" metric 5; }
+set_lte_backup() { ip route replace default via "$LTE_GW" dev "$LTE_IF" metric 20; }
+
+ensure_probe_routes() {
+  [ -n "$WAN_IP" ] && [ -n "$WAN_GW" ] && \
+    ip route replace "$WAN_PROBE"/32 via "$WAN_GW" dev "$WAN_IF" metric 1
+  ip route replace "$LTE_PROBE"/32 via "$LTE_GW" dev "$LTE_IF" metric 1
+}
+
+log "start (v2.2 route-surgery + state re-assert)"
+while :; do
+  get_wan
+  ensure_probe_routes
+  # v2.2: re-asercja stanu co cykl — zdarzenie netifd (DHCP renew, network reload,
+  # carrier flap) potrafi przywrocic uci-metryki w trakcie FAILOVER; idempotentne
+  # replace koryguja stan kernela w <=10 s. (set_lte_* sa ip-route-replace: upsert.)
+  [ "$state" = "lte" ] && set_lte_first  2>/dev/null
+  [ "$state" = "wan" ] && set_lte_backup 2>/dev/null
+  if [ -z "$WAN_IP" ] || [ -z "$WAN_GW" ]; then
+    fail=$((fail+1)); ok=0
+    if [ "$state" = "wan" ] && [ "$fail" -ge "$FAIL_MAX" ]; then
+      if probe_lte; then
+        state="lte"; set_lte_first
+        log "WAN bez adresu/gateway x$fail -> FAILOVER na LTE"
+        ha_push lte "wan no address x$fail"
+      else
+        log "WAN padł, ale LTE też martwy — zostaję na WAN"
+      fi
+    fi
+  else
+    if probe_wan; then
+      ok=$((ok+1)); fail=0
+      if [ "$state" = "lte" ] && [ "$ok" -ge "$OK_MIN" ]; then
+        state="wan"; set_lte_backup
+        log "Netia zyje (sonda ok x$ok) -> POWROT na WAN"
+        ha_push wan "probe ok x$ok"
+      fi
+    else
+      fail=$((fail+1)); ok=0
+      if [ "$state" = "wan" ] && [ "$fail" -ge "$FAIL_MAX" ]; then
+        if probe_lte; then
+          state="lte"; set_lte_first
+          log "SONDA WAN fail x$fail, LTE ok -> FAILOVER na LTE"
+          ha_push lte "wan fail x$fail"
+        else
+          log "WAN fail x$fail, ale LTE martwy — zostaję na WAN (czekam)"
+        fi
+      fi
+    fi
+  fi
+  [ "$state" = "lte" ] && sleep $SLEEP_LTE || sleep $SLEEP_OK
+done
