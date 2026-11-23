@@ -97,9 +97,6 @@ echo /etc/init.d/wan-watchdog >> /etc/sysupgrade.conf
 logread | grep wan-watchdog
 ```
 
-Full install + test playbook (including a blackhole-based outage simulation that
-does not touch any cable): see `INSTALL.md`.
-
 ## Testing a logical (non-physical) outage
 
 ```bash
@@ -117,7 +114,6 @@ ip route del blackhole 9.9.9.9/32
 | `wan-watchdog` | the service script (procd-managed daemon loop) |
 | `wan-watchdog.initd` | procd init wrapper (`respawn` = crash-proof) |
 | `wan-watchdog-verify.sh` | pre-flight checks for every assumption; `--deep` also probes both uplinks through pinned routes (cleans up via trap) |
-| `INSTALL.md` | step-by-step install + test playbook |
 
 Tune at the top of `wan-watchdog`: interface names, probe targets, `FAIL_MAX`,
 `OK_MIN`, sleep intervals (defaults: 3 fails × 10 s → failover, 2 oks × 10 s →
