@@ -6,6 +6,10 @@
 # v2.3: get_wan — składnia nawiasowa jsonfilter (25.12: "Invalid escape sequence").
 # v2.4: HA heartbeat — encja sensor.r6c_active_wan odradza się po restarcie HA
 #       (encje z POST /api/states nie przetrwają restartu: push na starcie + co ~1 min).
+# v2.5: FIX KRYTYCZNY (z testu blackhole 2026-11-25): dev "wan"/"wan_usb" to nazwy
+#       netifd — kernel ich nie zna, "ip route replace ... dev wan_usb" failował
+#       po cichu (stderr->/dev/null); trasy pinowane nie powstawały, a sonda LTE
+#       szła przez WAN (fałszywy pozytyw). Teraz urządzenia z ifstatus @.device.
 # Wymagania: uci network.wan.metric='10', network.wan_usb.metric='20'; procd init.d:
 #   START=99; USE_PROCD=1; command /bin/sh /usr/bin/wan-watchdog; respawn 3600 5 0
 
@@ -36,26 +40,32 @@ ha_push() {
 get_wan() {
   # v2.3: jsonfilter z kreskowanym kluczem (ipv4-address) wywala parser na 25.12
   # ("Invalid escape sequence") — składnia nawiasowa + fallback przez ip -4 addr.
+  # v2.5: WAN_DEV = rzeczywiste urządzenie kernela (eth0), nie nazwa netifd "wan".
   local s
   s=$(ifstatus $WAN_IF 2>/dev/null)
+  WAN_DEV=$(echo "$s" | jsonfilter -e '@.device' 2>/dev/null)
   WAN_IP=$(echo "$s" | jsonfilter -e '@["ipv4-address"][0]["address"]' 2>/dev/null)
   [ -n "$WAN_IP" ] || WAN_IP=$(echo "$s" | jsonfilter -e '@.device' 2>/dev/null | xargs -I{} ip -4 addr show dev {} 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
   WAN_GW=$(echo "$s" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null)
+  # v2.5: LTE_DEV również z ifstatus (kernel: eth2) — raz na cykl, tanio.
+  LTE_DEV=$(ifstatus $LTE_IF 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)
 }
 
 probe_wan() { ping -c1 -W2 "$WAN_PROBE" >/dev/null 2>&1; }
 probe_lte() { ping -c1 -W2 "$LTE_PROBE" >/dev/null 2>&1; }
 
-set_lte_first()  { ip route replace default via "$LTE_GW" dev "$LTE_IF" metric 5; }
-set_lte_backup() { ip route replace default via "$LTE_GW" dev "$LTE_IF" metric 20; }
+# v2.5: wszędzie dev = urządzenie kernela z ifstatus (eth0/eth2), NIE nazwa netifd.
+set_lte_first()  { [ -n "$LTE_DEV" ] && ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 5; }
+set_lte_backup() { [ -n "$LTE_DEV" ] && ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 20; }
 
 ensure_probe_routes() {
-  [ -n "$WAN_IP" ] && [ -n "$WAN_GW" ] && \
-    ip route replace "$WAN_PROBE"/32 via "$WAN_GW" dev "$WAN_IF" metric 1
-  ip route replace "$LTE_PROBE"/32 via "$LTE_GW" dev "$LTE_IF" metric 1
+  [ -n "$WAN_DEV" ] && [ -n "$WAN_IP" ] && [ -n "$WAN_GW" ] && \
+    ip route replace "$WAN_PROBE"/32 via "$WAN_GW" dev "$WAN_DEV" metric 1
+  [ -n "$LTE_DEV" ] && \
+    ip route replace "$LTE_PROBE"/32 via "$LTE_GW" dev "$LTE_DEV" metric 1
 }
 
-log "start (v2.4 route-surgery + state re-assert + HA heartbeat)"
+log "start (v2.5 route-surgery + state re-assert + HA heartbeat)"
 ha_push wan "start"
 while :; do
   get_wan
