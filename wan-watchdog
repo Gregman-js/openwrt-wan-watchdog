@@ -17,6 +17,7 @@
 #       przysłonięty przez 5, nieszkodliwy, a jego kasowanie = zbędny walk z netifd
 #       (odtwarza go z uci przy każdym zdarzeniu). Jedyny del, który ma znaczenie,
 #       to usunięcie metric 5 przy POWROCIE.
+# v2.8: set_lte_backup = samo del metric 5 — bez ensure-owania 20 (własność netifd).
 # Wymagania: uci network.wan.metric='10', network.wan_usb.metric='20'; procd init.d:
 #   START=99; USE_PROCD=1; command /bin/sh /usr/bin/wan-watchdog; respawn 3600 5 0
 
@@ -66,11 +67,11 @@ set_lte_first()  {
   [ -n "$LTE_DEV" ] || return 0
   ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 5
 }
-# v2.6/v2.7: powrót = usuń metric 5 (to był bug #2) + upewnij metric 20.
+# v2.8: powrót = TYLKO usuń metric 5 (bug #2). Metric 20 należy do netifd —
+# on ją odtwarza z uci; watchdog nie robi cudzej roboty.
 set_lte_backup() {
   [ -n "$LTE_DEV" ] || return 0
   ip route del default via "$LTE_GW" dev "$LTE_DEV" metric 5 2>/dev/null
-  ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 20
 }
 
 ensure_probe_routes() {
@@ -80,7 +81,7 @@ ensure_probe_routes() {
     ip route replace "$LTE_PROBE"/32 via "$LTE_GW" dev "$LTE_DEV" metric 1
 }
 
-log "start (v2.7 route-surgery + state re-assert + HA heartbeat)"
+log "start (v2.8 route-surgery + state re-assert + HA heartbeat)"
 ha_push wan "start"
 while :; do
   get_wan
