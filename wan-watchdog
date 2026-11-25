@@ -18,6 +18,12 @@
 #       (odtwarza go z uci przy każdym zdarzeniu). Jedyny del, który ma znaczenie,
 #       to usunięcie metric 5 przy POWROCIE.
 # v2.8: set_lte_backup = samo del metric 5 — bez ensure-owania 20 (własność netifd).
+# v2.9: PINY /32 WYCOFANE (decyzja usera: "nie podoba mi się że zmienia trasy dla
+#       wszystkich") — kollateral: LAN-klienci z hardcoded DNS 9.9.9.9 łamali się
+#       w failoverze. Sondy przez SO_BINDTODEVICE (-I dev); testy 2026-11-25:
+#       ping -I eth2 działa, eth2 down = "Network unreachable" instant (bez przecieku).
+#       UWAGA: symulacja padu WAN = "ip route del default ... dev eth0" (blackhole
+#       nie łapie sond bound-to-device — blackhole nie ma oif).
 # Wymagania: uci network.wan.metric='10', network.wan_usb.metric='20'; procd init.d:
 #   START=99; USE_PROCD=1; command /bin/sh /usr/bin/wan-watchdog; respawn 3600 5 0
 
@@ -59,8 +65,10 @@ get_wan() {
   LTE_DEV=$(ifstatus $LTE_IF 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)
 }
 
-probe_wan() { ping -c1 -W2 "$WAN_PROBE" >/dev/null 2>&1; }
-probe_lte() { ping -c1 -W2 "$LTE_PROBE" >/dev/null 2>&1; }
+# v2.9: sondy per-proces przez SO_BINDTODEVICE (-I <kernel-dev>) — brak pinów /32.
+#       Guard na pusty DEV: bez -I ping poszedłby defaultem (fałszywy pozytyw).
+probe_wan() { [ -n "$WAN_DEV" ] && ping -I "$WAN_DEV" -c1 -W2 "$WAN_PROBE" >/dev/null 2>&1; }
+probe_lte() { [ -n "$LTE_DEV" ] && ping -I "$LTE_DEV" -c1 -W2 "$LTE_PROBE" >/dev/null 2>&1; }
 
 # v2.7: failover = tylko DODAJ metric 5 (20 zostaje, przysłonięty — netifd-proof).
 set_lte_first()  {
@@ -74,18 +82,12 @@ set_lte_backup() {
   ip route del default via "$LTE_GW" dev "$LTE_DEV" metric 5 2>/dev/null
 }
 
-ensure_probe_routes() {
-  [ -n "$WAN_DEV" ] && [ -n "$WAN_IP" ] && [ -n "$WAN_GW" ] && \
-    ip route replace "$WAN_PROBE"/32 via "$WAN_GW" dev "$WAN_DEV" metric 1
-  [ -n "$LTE_DEV" ] && \
-    ip route replace "$LTE_PROBE"/32 via "$LTE_GW" dev "$LTE_DEV" metric 1
-}
+# v2.9: ensure_probe_routes() USUNIĘTE — piny /32 wycofane (SO_BINDTODEVICE w sondach).
 
-log "start (v2.8 route-surgery + state re-assert + HA heartbeat)"
+log "start (v2.9 route-surgery + state re-assert + HA heartbeat)"
 ha_push wan "start"
 while :; do
   get_wan
-  ensure_probe_routes
   # v2.2: re-asercja stanu co cykl — zdarzenie netifd (DHCP renew, network reload,
   # carrier flap) potrafi przywrocic uci-metryki w trakcie FAILOVER; idempotentne
   # replace koryguja stan kernela w <=10 s. (set_lte_* sa ip-route-replace: upsert.)
