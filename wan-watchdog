@@ -10,6 +10,9 @@
 #       netifd — kernel ich nie zna, "ip route replace ... dev wan_usb" failował
 #       po cichu (stderr->/dev/null); trasy pinowane nie powstawały, a sonda LTE
 #       szła przez WAN (fałszywy pozytyw). Teraz urządzenia z ifstatus @.device.
+# v2.6: FIX #2 (ten sam test, powrót): set_lte_backup tylko ENSURE-ował metric 20
+#       i NIC nie usuwał metric 5 — po "POWROT" ruch zostawał na LTE (5<10).
+#       Teraz flip = del + replace w obie strony; re-asercja idempotentna.
 # Wymagania: uci network.wan.metric='10', network.wan_usb.metric='20'; procd init.d:
 #   START=99; USE_PROCD=1; command /bin/sh /usr/bin/wan-watchdog; respawn 3600 5 0
 
@@ -54,9 +57,18 @@ get_wan() {
 probe_wan() { ping -c1 -W2 "$WAN_PROBE" >/dev/null 2>&1; }
 probe_lte() { ping -c1 -W2 "$LTE_PROBE" >/dev/null 2>&1; }
 
-# v2.5: wszędzie dev = urządzenie kernela z ifstatus (eth0/eth2), NIE nazwa netifd.
-set_lte_first()  { [ -n "$LTE_DEV" ] && ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 5; }
-set_lte_backup() { [ -n "$LTE_DEV" ] && ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 20; }
+# v2.6: flip = DEL starej trasy + REPLACE nowej (replace nie usuwa trasy z inną
+# metryką!). Bez del metric 5 po powrocie zostawała i ruch na LTE mimo loga "POWROT".
+set_lte_first()  {
+  [ -n "$LTE_DEV" ] || return 0
+  ip route del default via "$LTE_GW" dev "$LTE_DEV" metric 20 2>/dev/null
+  ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 5
+}
+set_lte_backup() {
+  [ -n "$LTE_DEV" ] || return 0
+  ip route del default via "$LTE_GW" dev "$LTE_DEV" metric 5 2>/dev/null
+  ip route replace default via "$LTE_GW" dev "$LTE_DEV" metric 20
+}
 
 ensure_probe_routes() {
   [ -n "$WAN_DEV" ] && [ -n "$WAN_IP" ] && [ -n "$WAN_GW" ] && \
@@ -65,7 +77,7 @@ ensure_probe_routes() {
     ip route replace "$LTE_PROBE"/32 via "$LTE_GW" dev "$LTE_DEV" metric 1
 }
 
-log "start (v2.5 route-surgery + state re-assert + HA heartbeat)"
+log "start (v2.6 route-surgery + state re-assert + HA heartbeat)"
 ha_push wan "start"
 while :; do
   get_wan
