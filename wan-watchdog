@@ -1,8 +1,11 @@
 #!/bin/sh
-# wan-watchdog v2.2 — route-surgery failover: wan (Netia) <-> wan_usb (LTE)
+# wan-watchdog v2.4 — route-surgery failover: wan (Netia) <-> wan_usb (LTE)
 # Sondy pinowane /32: 9.9.9.9 -> zawsze kablem, 1.0.0.1 -> zawsze LTE.
 # Failover = metryka LTE 5 (zamiast 20) — odporność na interwencje netifd.
 # v2.1: failover tylko, gdy BACKUP żyje (nie skakać w martwe LTE).
+# v2.3: get_wan — składnia nawiasowa jsonfilter (25.12: "Invalid escape sequence").
+# v2.4: HA heartbeat — encja sensor.r6c_active_wan odradza się po restarcie HA
+#       (encje z POST /api/states nie przetrwają restartu: push na starcie + co ~1 min).
 # Wymagania: uci network.wan.metric='10', network.wan_usb.metric='20'; procd init.d:
 #   START=99; USE_PROCD=1; command /bin/sh /usr/bin/wan-watchdog; respawn 3600 5 0
 
@@ -18,7 +21,7 @@ SLEEP_LTE=30
 HA_URL="http://192.168.1.10:8123/api/states/sensor.r6c_active_wan"
 HA_TOKEN_FILE="/root/.ha_token"   # opcjonalnie: long-lived token HA, chmod 600
 
-fail=0; ok=0; state="wan"
+fail=0; ok=0; state="wan"; beat=0
 
 log() { logger -t wan-watchdog "$1"; }
 
@@ -52,7 +55,8 @@ ensure_probe_routes() {
   ip route replace "$LTE_PROBE"/32 via "$LTE_GW" dev "$LTE_IF" metric 1
 }
 
-log "start (v2.2 route-surgery + state re-assert)"
+log "start (v2.4 route-surgery + state re-assert + HA heartbeat)"
+ha_push wan "start"
 while :; do
   get_wan
   ensure_probe_routes
@@ -93,5 +97,9 @@ while :; do
       fi
     fi
   fi
+  # v2.4: heartbeat — bez tego encja w HA znika na stałe po restarcie HA
+  # (do następnego failoveru); co 6 cykli przywraca/potwierdza stan.
+  beat=$((beat+1))
+  [ $((beat % 6)) -eq 0 ] && ha_push "$state" "heartbeat"
   [ "$state" = "lte" ] && sleep $SLEEP_LTE || sleep $SLEEP_OK
 done
